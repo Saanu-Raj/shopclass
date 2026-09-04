@@ -3,7 +3,6 @@ Shared product-import logic, used by both the `import_products` management
 command and the web upload endpoint, so there's exactly one place that
 understands the Excel column layout.
 """
-import openpyxl
 from django.db import transaction
 
 from classifier.models import Product
@@ -23,6 +22,10 @@ def import_products_from_workbook(file_obj_or_path, limit=None):
     Returns (created_count, skipped_count, warnings: list[str]).
     Raises ImportError_ if the file can't be read or is missing required columns.
     """
+    # openpyxl is only needed while processing a user-selected workbook; do
+    # not load it when Django starts the dashboard/API process.
+    import openpyxl
+
     try:
         wb = openpyxl.load_workbook(file_obj_or_path, read_only=True, data_only=True)
     except Exception as exc:

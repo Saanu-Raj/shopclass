@@ -18,9 +18,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
 from classifier.models import TaxonomyCategory
 
 LOW_CONFIDENCE_THRESHOLD = 0.35
@@ -63,6 +60,10 @@ class TaxonomyEngine:
         self._fit()
 
     def _fit(self):
+        # scikit-learn imports NumPy/SciPy. Keep that memory out of the web
+        # process until an upload actually starts classification.
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
         qs = (
             TaxonomyCategory.objects.filter(children__isnull=True)
             .only("id", "gid", "full_name", "search_text")
@@ -75,6 +76,10 @@ class TaxonomyEngine:
         self.matrix = self.vectorizer.fit_transform(corpus)
 
     def classify_text(self, text: str, top_n: int = TOP_N_ALTERNATIVES) -> list[CategoryMatch]:
+        # Import alongside the actual similarity calculation for the same
+        # reason as the vectorizer import in _fit().
+        from sklearn.metrics.pairwise import cosine_similarity
+
         clean = _clean_text(text)
         if not clean:
             return []
