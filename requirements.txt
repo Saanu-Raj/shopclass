@@ -1,0 +1,8 @@
+Django==6.1.1
+djangorestframework
+scikit-learn
+openpyxl
+dj-database-url
+gunicorn
+psycopg[binary]
+whitenoise[brotli]

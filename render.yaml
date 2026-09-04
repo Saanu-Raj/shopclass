@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: shopclass
+    runtime: python
+    plan: free
+    buildCommand: bash build.sh
+    startCommand: gunicorn shopclass.wsgi:application
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "false"
+      - key: ALLOWED_HOSTS
+        value: .onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shopclass-db
+          property: connectionString
+
+databases:
+  - name: shopclass-db
+    plan: free
