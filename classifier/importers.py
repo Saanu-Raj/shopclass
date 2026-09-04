@@ -16,7 +16,7 @@ class ImportError_(Exception):
 REQUIRED_COLUMNS = {"Product Number"}
 
 
-def import_products_from_workbook(file_obj_or_path, limit=None):
+def import_products_from_workbook(file_obj_or_path, limit=None, import_job=None):
     """
     Reads an Excel product list and creates/updates Product rows.
     Returns (created_count, skipped_count, warnings: list[str]).
@@ -91,6 +91,7 @@ def import_products_from_workbook(file_obj_or_path, limit=None):
             materials=clean(data.get("Materials")),
             image_urls=image_urls,
             raw_row={k: (v if not isinstance(v, str) else clean(v)) for k, v in data.items()},
+            import_job=import_job,
         ))
         if len(batch) >= BATCH_SIZE:
             with transaction.atomic():

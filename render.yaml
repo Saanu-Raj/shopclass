@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: bash build.sh
-    startCommand: gunicorn shopclass.wsgi:application --workers 1 --threads 1 --timeout 180 --graceful-timeout 30 --max-requests 200 --max-requests-jitter 25
+    startCommand: gunicorn shopclass.wsgi:application --workers 1 --threads 1 --timeout 600 --graceful-timeout 30 --max-requests 200 --max-requests-jitter 25
     envVars:
       - key: SECRET_KEY
         generateValue: true

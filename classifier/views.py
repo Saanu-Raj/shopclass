@@ -1,15 +1,18 @@
 from django.db.models import Count, Avg, Q
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.shortcuts import render, redirect
-from django.core.management import call_command
 from django.contrib import messages
+from django.http import JsonResponse
+from django.urls import reverse
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from classifier.models import Product, Classification, TaxonomyCategory
+from classifier.models import Product, Classification, ClassificationJob, TaxonomyCategory
 from classifier.serializers import ProductSerializer, ClassificationSerializer
 from classifier.importers import import_products_from_workbook, ImportError_
+from classifier.jobs import start_job
 
 
 class ProductViewSet(viewsets.ModelViewSet):
@@ -72,9 +75,8 @@ class ProductViewSet(viewsets.ModelViewSet):
 
 def upload_products(request):
     """
-    Accepts an uploaded Excel product list, imports it, then classifies
-    just the newly-added (pending) products -- so uploading a small batch
-    on top of an already-classified catalogue doesn't re-run everything.
+    Accepts an uploaded Excel product list and queues only its newly-created
+    products for background classification.
     """
     if request.method != "POST" or not request.FILES.get("file"):
         messages.error(request, "Please choose an .xlsx file to upload.")
@@ -85,31 +87,67 @@ def upload_products(request):
         messages.error(request, f"'{upload.name}' doesn't look like an Excel (.xlsx) file.")
         return redirect("dashboard")
 
+    job = ClassificationJob.objects.create()
     try:
-        created, skipped, warnings = import_products_from_workbook(upload)
+        created, skipped, warnings = import_products_from_workbook(upload, import_job=job)
     except ImportError_ as exc:
+        job.delete()
         messages.error(request, f"Import failed: {exc}")
         return redirect("dashboard")
     except Exception as exc:
+        job.delete()
         messages.error(request, f"Unexpected error while reading the file: {exc}")
         return redirect("dashboard")
 
     for w in warnings:
         messages.warning(request, w)
 
-    if created == 0:
+    job.total_products = job.products.count()
+    job.save(update_fields=["total_products"])
+    if job.total_products == 0:
+        job.delete()
         messages.warning(request, f"No new products were imported (skipped {skipped} row(s) with no Product Number).")
         return redirect("dashboard")
 
-    # Classify only what's pending -- reuses the same tested, resumable command.
-    call_command("classify_products")
+    transaction.on_commit(lambda: start_job(job.id))
 
-    msg = f"Imported {created} product(s)"
+    if request.headers.get("Accept") == "application/json":
+        return JsonResponse({
+            "job_id": job.id,
+            "progress_url": reverse("classification-job-progress", args=[job.id]),
+            "total_products": job.total_products,
+        }, status=202)
+
+    msg = f"Imported {job.total_products} product(s) and started classification in the background"
     if skipped:
         msg += f" (skipped {skipped} row(s) with no Product Number)"
-    msg += " and ran classification on them."
     messages.success(request, msg)
     return redirect("dashboard")
+
+
+def classification_job_progress(request, job_id):
+    """Return persisted job progress and resume work after a process restart."""
+    try:
+        job = ClassificationJob.objects.get(pk=job_id)
+    except ClassificationJob.DoesNotExist:
+        return JsonResponse({"detail": "Classification job not found."}, status=404)
+
+    if job.status in {ClassificationJob.STATUS_PENDING, ClassificationJob.STATUS_PROCESSING}:
+        start_job(job.id)
+
+    total = job.total_products
+    percent = round((job.processed_products / total) * 100, 1) if total else 0
+    return JsonResponse({
+        "id": job.id,
+        "status": job.status,
+        "total_products": total,
+        "processed_products": job.processed_products,
+        "classified_products": job.classified_products,
+        "failed_products": job.failed_products,
+        "needs_review_products": job.needs_review_products,
+        "percent": percent,
+        "error_message": job.error_message,
+    })
 
 
 def dashboard(request):
@@ -137,6 +175,9 @@ def dashboard(request):
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(product_number__icontains=search))
     page_obj = Paginator(qs, 100).get_page(request.GET.get("page"))
+    active_job = ClassificationJob.objects.filter(
+        status__in=[ClassificationJob.STATUS_PENDING, ClassificationJob.STATUS_PROCESSING]
+    ).order_by("-created_at").first()
 
     return render(request, "classifier/dashboard.html", {
         "stats": stats,
@@ -144,6 +185,7 @@ def dashboard(request):
         "page_obj": page_obj,
         "needs_review": needs_review,
         "search": search,
+        "active_job": active_job,
     })
 
 

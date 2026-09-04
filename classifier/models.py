@@ -57,9 +57,44 @@ class Product(models.Model):
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
     error_message = models.TextField(blank=True, default="")
+    import_job = models.ForeignKey(
+        "ClassificationJob", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="products",
+    )
 
     def __str__(self):
         return self.name or self.product_number
+
+
+class ClassificationJob(models.Model):
+    """Database-backed progress state for one user-uploaded workbook."""
+
+    STATUS_PENDING = "pending"
+    STATUS_PROCESSING = "processing"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    total_products = models.PositiveIntegerField(default=0)
+    processed_products = models.PositiveIntegerField(default=0)
+    classified_products = models.PositiveIntegerField(default=0)
+    failed_products = models.PositiveIntegerField(default=0)
+    needs_review_products = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True, default="")
+    worker_token = models.CharField(max_length=64, blank=True, default="")
+    worker_lease_expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Upload job {self.pk} ({self.status})"
 
 
 class Classification(models.Model):

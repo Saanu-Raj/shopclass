@@ -20,6 +20,13 @@
   .upload-box input[type=file] { font-size:13px; }
   .upload-box button { padding:6px 14px; border-radius:6px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; font-size:14px; }
   .upload-box .hint { color:#666; font-size:12px; margin-left:6px; }
+  .upload-progress { display:none; margin:12px 24px; padding:14px; background:#fff; border:1px solid var(--border); border-radius:8px; max-width:620px; }
+  .upload-progress.visible { display:block; }
+  .progress-title { font-weight:700; margin-bottom:8px; }
+  .progress-track { height:14px; border-radius:8px; overflow:hidden; background:#e7e7e7; margin:10px 0; }
+  .progress-bar { height:100%; width:0; background:var(--accent); transition:width .25s ease; }
+  .progress-counts { display:flex; gap:16px; flex-wrap:wrap; font-size:13px; color:#555; }
+  .progress-error { color:var(--danger); margin-top:8px; }
   .banner { margin:12px 24px 0; padding:10px 14px; border-radius:6px; font-size:14px; }
   .banner.success { background:#eaf7ee; color:#1e6b34; border:1px solid #b7e4c4; }
   .banner.error { background:#fdecea; color:#a33; border:1px solid #f3c6c1; }
@@ -66,12 +73,25 @@
 {% endif %}
 
 <div class="stats">
-  <div class="stat-card"><div class="num">{{ stats.total }}</div><div class="label">Total products</div></div>
-  <div class="stat-card"><div class="num">{{ stats.classified }}</div><div class="label">Classified</div></div>
-  <div class="stat-card"><div class="num">{{ stats.needs_review }}</div><div class="label">Needs review</div></div>
+  <div class="stat-card"><div class="num" id="stat-total">{{ stats.total }}</div><div class="label">Total products</div></div>
+  <div class="stat-card"><div class="num" id="stat-classified">{{ stats.classified }}</div><div class="label">Classified</div></div>
+  <div class="stat-card"><div class="num" id="stat-needs-review">{{ stats.needs_review }}</div><div class="label">Needs review</div></div>
   <div class="stat-card"><div class="num">{{ stats.approved }}</div><div class="label">Approved</div></div>
   <div class="stat-card"><div class="num">{{ stats.avg_confidence|floatformat:2 }}</div><div class="label">Avg confidence</div></div>
 </div>
+
+<section class="upload-progress{% if active_job %} visible{% endif %}" id="upload-progress"{% if active_job %} data-progress-url="{% url 'classification-job-progress' active_job.id %}"{% endif %} aria-live="polite">
+  <div class="progress-title" id="progress-title">Processing products...</div>
+  <div id="progress-numbers">0 / 0</div>
+  <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+  <div id="progress-percent">0%</div>
+  <div class="progress-counts">
+    <span id="progress-classified">Classified: 0</span>
+    <span id="progress-review">Needs review: 0</span>
+    <span id="progress-failed">Failed: 0</span>
+  </div>
+  <div class="progress-error" id="progress-error"></div>
+</section>
 
 <div class="toolbar">
   <a href="?needs_review=true" class="{% if needs_review %}active{% endif %}">Needs review ({{ stats.needs_review }})</a>
@@ -160,6 +180,114 @@ async function submitAction(form) {
   await fetch(url, { method: 'POST', headers: { 'X-CSRFToken': getCookie('csrftoken') } });
   location.reload();
   return false;
+}
+
+const uploadForm = document.querySelector('.upload-box');
+const uploadButton = uploadForm.querySelector('button[type="submit"]');
+const progressPanel = document.getElementById('upload-progress');
+const progressTitle = document.getElementById('progress-title');
+const progressNumbers = document.getElementById('progress-numbers');
+const progressBar = document.getElementById('progress-bar');
+const progressPercent = document.getElementById('progress-percent');
+const progressClassified = document.getElementById('progress-classified');
+const progressReview = document.getElementById('progress-review');
+const progressFailed = document.getElementById('progress-failed');
+const progressError = document.getElementById('progress-error');
+const initialStats = {
+  total: Number(document.getElementById('stat-total').textContent),
+  classified: Number(document.getElementById('stat-classified').textContent),
+  needsReview: Number(document.getElementById('stat-needs-review').textContent),
+};
+{% if active_job %}
+initialStats.total -= {{ active_job.total_products }};
+initialStats.classified -= {{ active_job.classified_products }};
+initialStats.needsReview -= {{ active_job.needs_review_products }};
+{% endif %}
+let progressTimer = null;
+
+function renderProgress(data) {
+  const processed = data.processed_products || 0;
+  const total = data.total_products || 0;
+  const percent = data.percent || 0;
+  progressNumbers.textContent = `${processed.toLocaleString()} / ${total.toLocaleString()} processed`;
+  progressBar.style.width = `${percent}%`;
+  progressPercent.textContent = `${percent}%`;
+  progressClassified.textContent = `Classified: ${(data.classified_products || 0).toLocaleString()}`;
+  progressReview.textContent = `Needs review: ${(data.needs_review_products || 0).toLocaleString()}`;
+  progressFailed.textContent = `Failed: ${(data.failed_products || 0).toLocaleString()}`;
+  document.getElementById('stat-total').textContent = (initialStats.total + total).toLocaleString();
+  document.getElementById('stat-classified').textContent = (initialStats.classified + (data.classified_products || 0)).toLocaleString();
+  document.getElementById('stat-needs-review').textContent = (initialStats.needsReview + (data.needs_review_products || 0)).toLocaleString();
+
+  if (data.status === 'completed') {
+    progressTitle.textContent = 'Classification completed';
+    progressNumbers.textContent = `${total.toLocaleString()} / ${total.toLocaleString()} processed`;
+    progressBar.style.width = '100%';
+    progressPercent.textContent = '100%';
+    clearInterval(progressTimer);
+    uploadButton.disabled = false;
+    uploadButton.textContent = 'Upload & classify';
+  } else if (data.status === 'failed') {
+    progressTitle.textContent = 'Classification failed';
+    progressError.textContent = data.error_message || 'The background worker stopped unexpectedly.';
+    clearInterval(progressTimer);
+    uploadButton.disabled = false;
+    uploadButton.textContent = 'Upload & classify';
+  }
+}
+
+async function pollProgress(url) {
+  try {
+    const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not read classification progress.');
+    renderProgress(data);
+  } catch (error) {
+    progressTitle.textContent = 'Unable to read progress';
+    progressError.textContent = error.message;
+    clearInterval(progressTimer);
+    uploadButton.disabled = false;
+    uploadButton.textContent = 'Upload & classify';
+  }
+}
+
+function beginPolling(url) {
+  progressPanel.classList.add('visible');
+  progressPanel.dataset.progressUrl = url;
+  clearInterval(progressTimer);
+  pollProgress(url);
+  progressTimer = setInterval(() => pollProgress(url), 2000);
+}
+
+uploadForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  uploadButton.disabled = true;
+  uploadButton.textContent = 'Uploading...';
+  progressError.textContent = '';
+  try {
+    const response = await fetch(uploadForm.action, {
+      method: 'POST',
+      body: new FormData(uploadForm),
+      headers: { 'Accept': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Upload failed.');
+    initialStats.total = Number(document.getElementById('stat-total').textContent);
+    initialStats.classified = Number(document.getElementById('stat-classified').textContent);
+    initialStats.needsReview = Number(document.getElementById('stat-needs-review').textContent);
+    uploadButton.textContent = 'Processing...';
+    beginPolling(data.progress_url);
+  } catch (error) {
+    progressPanel.classList.add('visible');
+    progressTitle.textContent = 'Upload failed';
+    progressError.textContent = error.message;
+    uploadButton.disabled = false;
+    uploadButton.textContent = 'Upload & classify';
+  }
+});
+
+if (progressPanel.dataset.progressUrl) {
+  beginPolling(progressPanel.dataset.progressUrl);
 }
 </script>
 </body>
